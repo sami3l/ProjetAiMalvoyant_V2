@@ -4,15 +4,14 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- 🗺 Carte OpenStreetMap -->
+    <!-- 🗺️ Carte OpenStreetMap -->
     <org.osmdroid.views.MapView
         android:id="@+id/mapView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
-        android:clickable="true"
-        android:focusable="true" />
+        android:clickable="true" />
 
-    <!-- 📸 Caméra + IA dans un conteneur en haut à droite -->
+    <!-- 📷 Caméra + IA dans un coin -->
     <FrameLayout
         android:layout_width="160dp"
         android:layout_height="200dp"
@@ -21,13 +20,13 @@
         android:layout_margin="12dp"
         android:background="@android:color/black">
 
-        <!-- Vue caméra -->
+        <!-- Flux caméra -->
         <TextureView
             android:id="@+id/textureView"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- Overlay IA (cadres rouges) -->
+        <!-- Détection IA -->
         <ImageView
             android:id="@+id/imageView"
             android:layout_width="match_parent"
@@ -35,7 +34,7 @@
             android:background="@android:color/transparent" />
     </FrameLayout>
 
-    <!-- 🎮 Boutons de contrôle utilisateur en bas -->
+    <!-- 🎮 Boutons utilisateur -->
     <LinearLayout
         android:id="@+id/buttonPanel"
         android:layout_width="match_parent"

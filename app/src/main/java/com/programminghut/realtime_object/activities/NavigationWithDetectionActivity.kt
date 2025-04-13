@@ -4,7 +4,9 @@ import android.Manifest
 import android.content.pm.PackageManager
 import android.graphics.*
 import android.hardware.camera2.*
+import android.location.LocationManager
 import android.os.*
+import android.util.Log
 import android.view.*
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
@@ -15,6 +17,7 @@ import com.programminghut.realtime_object.helpers.TTSHelper
 import com.programminghut.realtime_object.ml.SsdMobilenetV11Metadata1
 import org.json.JSONObject
 import org.osmdroid.config.Configuration
+import org.osmdroid.tileprovider.tilesource.TileSourceFactory
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.Marker
@@ -55,34 +58,35 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ✅ Initialisation OSMDroid
+        // ⚙️ OSMDroid Init
         val ctx = applicationContext
         Configuration.getInstance().load(ctx, getSharedPreferences("osmdroid", MODE_PRIVATE))
         Configuration.getInstance().userAgentValue = ctx.packageName
 
         setContentView(R.layout.activity_navigation_with_detection)
 
-        // ✅ Initialisation UI views
+        // 🛡 Permissions dynamiques
+        if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
+            ), 101)
+        }
+
+        // 🎛 UI Init
         map = findViewById(R.id.mapView)
         textureView = findViewById(R.id.textureView)
         imageView = findViewById(R.id.imageView)
 
-        // ✅ Langue & synthèse vocale
         val selectedLang = intent.getStringExtra("lang") ?: "fr"
         ttsHelper = TTSHelper(this)
-        if (selectedLang == "darija") {
-            ttsHelper.setLanguage("ar", "MA")
-        } else {
-            ttsHelper.setLanguage("fr", "FR")
-        }
+        ttsHelper.setLanguage(if (selectedLang == "darija") "ar" else "fr", if (selectedLang == "darija") "MA" else "FR")
         announcer = ObstacleAnnouncer(this, ttsHelper, selectedLang)
 
-        // ✅ Chargement modèle IA
         labels = FileUtil.loadLabels(this, "labels.txt")
         model = SsdMobilenetV11Metadata1.newInstance(this)
         imageProcessor = ImageProcessor.Builder()
-            .add(ResizeOp(300, 300, ResizeOp.ResizeMethod.BILINEAR))
-            .build()
+            .add(ResizeOp(300, 300, ResizeOp.ResizeMethod.BILINEAR)).build()
         paint = Paint().apply {
             color = Color.RED
             strokeWidth = 6f
@@ -98,7 +102,7 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
     }
 
     private fun setupMap() {
-        map.setTileSource(org.osmdroid.tileprovider.tilesource.TileSourceFactory.MAPNIK)
+        map.setTileSource(TileSourceFactory.MAPNIK)
         map.setMultiTouchControls(true)
         map.controller.setZoom(18.0)
 
@@ -107,24 +111,54 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         locationOverlay.enableFollowLocation()
         map.overlays.add(locationOverlay)
 
+        // Fallback location si GPS pas prêt
+        val fallback = getLastKnownLocation()
+        if (fallback != null) {
+            map.controller.animateTo(fallback)
+            Log.d("GPS", "Fallback to $fallback")
+        }
+
         locationOverlay.runOnFirstFix {
             runOnUiThread {
-                val user = GeoPoint(locationOverlay.myLocation.latitude, locationOverlay.myLocation.longitude)
-                map.controller.animateTo(user)
+                val loc = locationOverlay.myLocation
+                if (loc != null) {
+                    map.controller.animateTo(GeoPoint(loc.latitude, loc.longitude))
+                    Log.i("GPS", "GPS fix from overlay: $loc")
+                } else {
+                    Log.e("GPS", "runOnFirstFix triggered but location is null")
+                }
             }
         }
 
         map.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_UP) {
-                if (locationOverlay.myLocation == null) {
-                    Toast.makeText(this, "Position GPS indisponible. Veuillez patienter...", Toast.LENGTH_SHORT).show()
-                } else {
-                    val point = map.projection.fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
-                    handleDestinationSelected(point)
+                val userLoc = locationOverlay.myLocation
+                if (userLoc == null) {
+                    Toast.makeText(this, "Position GPS indisponible", Toast.LENGTH_SHORT).show()
+                    return@setOnTouchListener false
                 }
+
+                val point = map.projection.fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
+                handleDestinationSelected(point)
             }
             false
         }
+    }
+
+    private fun getLastKnownLocation(): GeoPoint? {
+        val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
+        val providers = locationManager.getProviders(true)
+        for (provider in providers) {
+            try {
+                val loc = locationManager.getLastKnownLocation(provider)
+                if (loc != null) {
+                    return GeoPoint(loc.latitude, loc.longitude)
+                }
+            } catch (e: SecurityException) {
+                e.printStackTrace()
+            }
+        }
+        return null
     }
 
     private fun handleDestinationSelected(destination: GeoPoint) {
@@ -136,14 +170,13 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         }
         map.overlays.add(destinationMarker)
 
-        val start = locationOverlay.myLocation
+        val start = locationOverlay.myLocation ?: getLastKnownLocation()
         if (start == null) {
             Toast.makeText(this, "Position actuelle inconnue.", Toast.LENGTH_SHORT).show()
             return
         }
 
-        val startPoint = GeoPoint(start.latitude, start.longitude)
-        fetchRoute(startPoint, destination)
+        fetchRoute(GeoPoint(start.latitude, start.longitude), destination)
     }
 
     private fun fetchRoute(start: GeoPoint, end: GeoPoint) {
@@ -178,7 +211,6 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
 
     private fun drawRoute(points: List<GeoPoint>) {
         currentPolyline?.let { map.overlays.remove(it) }
-
         val polyline = Polyline().apply {
             setPoints(points)
             color = Color.BLUE
@@ -189,52 +221,16 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         map.invalidate()
     }
 
-    private fun navigationLoop() {
-        while (true) {
-            val loc = locationOverlay.myLocation
-            if (loc != null && currentRoute.isNotEmpty()) {
-                val user = GeoPoint(loc.latitude, loc.longitude)
-
-                var closestIndex = 0
-                var minDist = Double.MAX_VALUE
-                for (i in currentRoute.indices) {
-                    val dist = user.distanceToAsDouble(currentRoute[i])
-                    if (dist < minDist) {
-                        minDist = dist
-                        closestIndex = i
-                    }
-                }
-
-                if (closestIndex > lastInstructionIndex) {
-                    val message = when {
-                        closestIndex == currentRoute.size - 1 -> "Vous êtes arrivé"
-                        closestIndex < currentRoute.size - 1 -> "Continuez 50 mètres"
-                        else -> null
-                    }
-
-                    message?.let {
-                        ttsHelper.speak(it)
-                        lastInstructionIndex = closestIndex
-                    }
-                }
-            }
-            Thread.sleep(4000)
-        }
-    }
-
     private fun setupButtons() {
-        findViewById<Button>(R.id.btnBack).setOnClickListener {
-            finish()
-        }
-
+        findViewById<Button>(R.id.btnBack).setOnClickListener { finish() }
         findViewById<Button>(R.id.btnCenter).setOnClickListener {
-            val loc = locationOverlay.myLocation
-            if (loc != null) map.controller.animateTo(GeoPoint(loc.latitude, loc.longitude))
+            locationOverlay.myLocation?.let {
+                map.controller.animateTo(GeoPoint(it.latitude, it.longitude))
+            }
         }
-
         findViewById<Button>(R.id.btnRecalculate).setOnClickListener {
             val dest = destinationMarker?.position
-            val loc = locationOverlay.myLocation
+            val loc = locationOverlay.myLocation ?: getLastKnownLocation()
             if (loc != null && dest != null) {
                 fetchRoute(GeoPoint(loc.latitude, loc.longitude), dest)
             }
@@ -252,7 +248,6 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
             override fun onSurfaceTextureAvailable(surface: SurfaceTexture, width: Int, height: Int) {
                 openCamera()
             }
-
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
             override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = false
             override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
@@ -327,4 +322,40 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         ttsHelper.shutdown()
         model.close()
     }
+    private fun navigationLoop() {
+        while (true) {
+            val loc = locationOverlay.myLocation
+            if (loc != null && currentRoute.isNotEmpty()) {
+                val user = GeoPoint(loc.latitude, loc.longitude)
+
+                // Trouver le point le plus proche sur le trajet
+                var closestIndex = 0
+                var minDist = Double.MAX_VALUE
+                for (i in currentRoute.indices) {
+                    val dist = user.distanceToAsDouble(currentRoute[i])
+                    if (dist < minDist) {
+                        minDist = dist
+                        closestIndex = i
+                    }
+                }
+
+                // Annonce vocale en fonction de la position
+                if (closestIndex > lastInstructionIndex) {
+                    val message = when {
+                        closestIndex == currentRoute.size - 1 -> "Vous êtes arrivé"
+                        closestIndex < currentRoute.size - 1 -> "Continuez 50 mètres"
+                        else -> null
+                    }
+
+                    message?.let {
+                        ttsHelper.speak(it)
+                        lastInstructionIndex = closestIndex
+                    }
+                }
+            }
+
+            Thread.sleep(4000) // Pause entre chaque mise à jour
+        }
+    }
+
 }
