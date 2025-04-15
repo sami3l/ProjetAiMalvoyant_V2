@@ -54,39 +54,49 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
     private var destinationMarker: Marker? = null
 
     private val obstacleLabels = listOf("person", "car", "truck", "motorcycle", "bicycle")
+    private val voiceInstructions = mutableListOf<String>()
+    private lateinit var selectedLang: String
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ⚙️ OSMDroid Init
+        // 🧭 OSMDroid setup
         val ctx = applicationContext
         Configuration.getInstance().load(ctx, getSharedPreferences("osmdroid", MODE_PRIVATE))
         Configuration.getInstance().userAgentValue = ctx.packageName
 
         setContentView(R.layout.activity_navigation_with_detection)
 
-        // 🛡 Permissions dynamiques
+        // 🛡 Permissions
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.CAMERA
             ), 101)
         }
 
-        // 🎛 UI Init
+        // 🗣️ Langue & TTS
+        selectedLang = intent.getStringExtra("lang") ?: "fr"
+        ttsHelper = TTSHelper(this)
+        if (selectedLang == "darija") {
+            ttsHelper.setLanguage("ar", "MA")
+        } else {
+            ttsHelper.setLanguage("fr", "FR")
+        }
+        announcer = ObstacleAnnouncer(this, ttsHelper, selectedLang)
+
+        // 🖼️ Views
         map = findViewById(R.id.mapView)
         textureView = findViewById(R.id.textureView)
         imageView = findViewById(R.id.imageView)
 
-        val selectedLang = intent.getStringExtra("lang") ?: "fr"
-        ttsHelper = TTSHelper(this)
-        ttsHelper.setLanguage(if (selectedLang == "darija") "ar" else "fr", if (selectedLang == "darija") "MA" else "FR")
-        announcer = ObstacleAnnouncer(this, ttsHelper, selectedLang)
-
+        // 🧠 ML Model
         labels = FileUtil.loadLabels(this, "labels.txt")
         model = SsdMobilenetV11Metadata1.newInstance(this)
-        imageProcessor = ImageProcessor.Builder()
-            .add(ResizeOp(300, 300, ResizeOp.ResizeMethod.BILINEAR)).build()
+        imageProcessor = ImageProcessor.Builder().add(
+            ResizeOp(300, 300, ResizeOp.ResizeMethod.BILINEAR)
+        ).build()
         paint = Paint().apply {
             color = Color.RED
             strokeWidth = 6f
@@ -98,6 +108,7 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         setupCamera()
         setupButtons()
 
+        // 🔁 Loop navigation
         Thread { navigationLoop() }.start()
     }
 
@@ -111,21 +122,16 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         locationOverlay.enableFollowLocation()
         map.overlays.add(locationOverlay)
 
-        // Fallback location si GPS pas prêt
+        // Fallback GPS
         val fallback = getLastKnownLocation()
-        if (fallback != null) {
-            map.controller.animateTo(fallback)
-            Log.d("GPS", "Fallback to $fallback")
+        fallback?.let {
+            map.controller.animateTo(it)
         }
 
         locationOverlay.runOnFirstFix {
             runOnUiThread {
-                val loc = locationOverlay.myLocation
-                if (loc != null) {
-                    map.controller.animateTo(GeoPoint(loc.latitude, loc.longitude))
-                    Log.i("GPS", "GPS fix from overlay: $loc")
-                } else {
-                    Log.e("GPS", "runOnFirstFix triggered but location is null")
+                locationOverlay.myLocation?.let {
+                    map.controller.animateTo(GeoPoint(it.latitude, it.longitude))
                 }
             }
         }
@@ -182,7 +188,7 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
     private fun fetchRoute(start: GeoPoint, end: GeoPoint) {
         val url = "https://router.project-osrm.org/route/v1/driving/" +
                 "${start.longitude},${start.latitude};${end.longitude},${end.latitude}" +
-                "?overview=full&geometries=geojson"
+                "?overview=full&geometries=geojson&steps=true"
 
         Thread {
             try {
@@ -190,14 +196,37 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
                 connection.connect()
                 val json = connection.inputStream.bufferedReader().use { it.readText() }
 
-                val geometry = JSONObject(json)
-                    .getJSONArray("routes").getJSONObject(0)
-                    .getJSONObject("geometry").getJSONArray("coordinates")
+                val root = JSONObject(json)
+                val routeObj = root.getJSONArray("routes").getJSONObject(0)
+                val geometry = routeObj.getJSONObject("geometry").getJSONArray("coordinates")
+                val steps = routeObj.getJSONArray("legs").getJSONObject(0).getJSONArray("steps")
 
                 val route = mutableListOf<GeoPoint>()
+                voiceInstructions.clear()
+
                 for (i in 0 until geometry.length()) {
                     val coord = geometry.getJSONArray(i)
                     route.add(GeoPoint(coord.getDouble(1), coord.getDouble(0)))
+                }
+
+                for (i in 0 until steps.length()) {
+                    val maneuver = steps.getJSONObject(i).getJSONObject("maneuver")
+                    val type = maneuver.getString("type")
+                    val modifier = maneuver.optString("modifier", "")
+
+                    val instruction = when (type) {
+                        "turn" -> when (modifier) {
+                            "left" -> if (selectedLang == "fr") "Tournez à gauche" else "dūr ṣmāl"
+                            "right" -> if (selectedLang == "fr") "Tournez à droite" else "dūr limīn"
+                            "straight" -> if (selectedLang == "fr") "Continuez tout droit" else "zīd nqaddām"
+                            else -> if (selectedLang == "fr") "Continuez" else "zīd"
+                        }
+                        "depart" -> if (selectedLang == "fr") "Commencez votre trajet" else "bda l masār"
+                        "arrive" -> if (selectedLang == "fr") "Vous êtes arrivé" else "wṣlt"
+                        else -> if (selectedLang == "fr") "Continuez" else "zīd"
+                    }
+
+                    voiceInstructions.add(instruction)
                 }
 
                 currentRoute = route
@@ -317,18 +346,12 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         imageView.setImageBitmap(mutable)
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        ttsHelper.shutdown()
-        model.close()
-    }
     private fun navigationLoop() {
         while (true) {
             val loc = locationOverlay.myLocation
             if (loc != null && currentRoute.isNotEmpty()) {
                 val user = GeoPoint(loc.latitude, loc.longitude)
 
-                // Trouver le point le plus proche sur le trajet
                 var closestIndex = 0
                 var minDist = Double.MAX_VALUE
                 for (i in currentRoute.indices) {
@@ -339,23 +362,21 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
                     }
                 }
 
-                // Annonce vocale en fonction de la position
-                if (closestIndex > lastInstructionIndex) {
-                    val message = when {
-                        closestIndex == currentRoute.size - 1 -> "Vous êtes arrivé"
-                        closestIndex < currentRoute.size - 1 -> "Continuez 50 mètres"
-                        else -> null
-                    }
-
-                    message?.let {
-                        ttsHelper.speak(it)
-                        lastInstructionIndex = closestIndex
-                    }
+                if (closestIndex > lastInstructionIndex && closestIndex < voiceInstructions.size) {
+                    val instruction = voiceInstructions[closestIndex]
+                    Log.i("TTS-GUIDE", "📢 $instruction")
+                    ttsHelper.speak(instruction)
+                    lastInstructionIndex = closestIndex
                 }
             }
 
-            Thread.sleep(4000) // Pause entre chaque mise à jour
+            Thread.sleep(4000)
         }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        ttsHelper.shutdown()
+        model.close()
+    }
 }

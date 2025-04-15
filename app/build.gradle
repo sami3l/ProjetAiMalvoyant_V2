@@ -4,6 +4,7 @@ plugins {
 }
 
 android {
+    namespace 'com.programminghut.realtime_object' // ✅ Obligatoire avec AGP 7+
     compileSdk 33
 
     defaultConfig {
@@ -35,6 +36,14 @@ android {
     buildFeatures {
         mlModelBinding true
     }
+
+    // ✅ Changer le nom de l’APK en sortie
+    applicationVariants.all { variant ->
+        variant.outputs.all { output ->
+            def appName = "GuideMalvoyant_v2"
+            outputFileName = "${appName}.apk"
+        }
+    }
 }
 
 dependencies {
@@ -48,7 +57,7 @@ dependencies {
     implementation 'org.tensorflow:tensorflow-lite-support:0.1.0'
     implementation 'org.tensorflow:tensorflow-lite-metadata:0.1.0'
 
-    // Synthèse vocale (TTS) déjà incluse dans Android, pas besoin de dépendance externe
+    // OpenStreetMap
     implementation 'org.osmdroid:osmdroid-android:6.1.16'
     implementation 'org.osmdroid:osmdroid-wms:6.1.16'
 

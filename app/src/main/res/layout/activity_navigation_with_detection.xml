@@ -4,14 +4,14 @@
     android:layout_width="match_parent"
     android:layout_height="match_parent">
 
-    <!-- 🗺️ Carte OpenStreetMap -->
+    <!-- 🌍 Carte principale -->
     <org.osmdroid.views.MapView
         android:id="@+id/mapView"
         android:layout_width="match_parent"
         android:layout_height="match_parent"
         android:clickable="true" />
 
-    <!-- 📷 Caméra + IA dans un coin -->
+    <!-- 👁 Caméra IA (coin supérieur droit) -->
     <FrameLayout
         android:layout_width="160dp"
         android:layout_height="200dp"
@@ -20,13 +20,13 @@
         android:layout_margin="12dp"
         android:background="@android:color/black">
 
-        <!-- Flux caméra -->
+        <!-- 📷 Flux vidéo -->
         <TextureView
             android:id="@+id/textureView"
             android:layout_width="match_parent"
             android:layout_height="match_parent" />
 
-        <!-- Détection IA -->
+        <!-- 🧠 Affichage IA (rectangles rouges) -->
         <ImageView
             android:id="@+id/imageView"
             android:layout_width="match_parent"
@@ -34,7 +34,7 @@
             android:background="@android:color/transparent" />
     </FrameLayout>
 
-    <!-- 🎮 Boutons utilisateur -->
+    <!-- 🎮 Panneau de contrôle (bas écran) -->
     <LinearLayout
         android:id="@+id/buttonPanel"
         android:layout_width="match_parent"
@@ -67,7 +67,7 @@
             android:id="@+id/btnRecalculate"
             android:layout_width="wrap_content"
             android:layout_height="wrap_content"
-            android:text="🔁 Routage"
+            android:text="🔁 Recalculer"
             android:layout_marginHorizontal="8dp"
             android:backgroundTint="@android:color/holo_green_dark"
             android:textColor="@android:color/white" />

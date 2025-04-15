@@ -1,6 +1,9 @@
 package com.programminghut.realtime_object.helpers
 
 import android.content.Context
+import android.os.Build
+import android.os.VibrationEffect
+import android.os.Vibrator
 import java.util.*
 
 class ObstacleAnnouncer(
@@ -8,6 +11,7 @@ class ObstacleAnnouncer(
     private val tts: TTSHelper,
     private val lang: String
 ) {
+    private val vibrator = context.getSystemService(Context.VIBRATOR_SERVICE) as Vibrator
 
     private val labelMap = mapOf(
         "person" to mapOf("fr" to "personne", "darija" to "shī wāḥed"),
@@ -34,5 +38,13 @@ class ObstacleAnnouncer(
         val message = if (lang == "fr") "Attention, $translated devant" else "ḥder, kayn $translated"
         tts.speak(message)
         lastSpoken[label] = now
+
+        // 📳 Vibration
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            vibrator.vibrate(VibrationEffect.createOneShot(300, VibrationEffect.DEFAULT_AMPLITUDE))
+        } else {
+            @Suppress("DEPRECATION")
+            vibrator.vibrate(300)
+        }
     }
 }
