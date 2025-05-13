@@ -53,40 +53,62 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
     private var lastInstructionIndex = -1
     private var destinationMarker: Marker? = null
 
-    private val obstacleLabels = listOf("person", "car", "truck", "motorcycle", "bicycle")
+    // Configuration de détection
+    private val REAL_OBSTACLE_SIZES = mapOf(
+        "person" to Size(0.5f, 1.7f),    // width x height en mètres
+        "car" to Size(2.0f, 1.5f),
+        "truck" to Size(2.5f, 2.5f),
+        "motorcycle" to Size(0.8f, 1.1f),
+        "bicycle" to Size(0.6f, 1.0f),
+        "bus" to Size(2.5f, 3.0f),
+        "train" to Size(3.0f, 3.5f),
+        "bench" to Size(1.5f, 0.5f),
+        "traffic light" to Size(0.3f, 0.8f),
+        "stop sign" to Size(0.6f, 0.6f),
+        "fire hydrant" to Size(0.3f, 0.8f),
+        "parking meter" to Size(0.3f, 1.0f)
+    )
+    private val FOCAL_LENGTH = 1200f  // À calibrer pour votre appareil
+    private val MAX_DETECTION_DISTANCE = 10.0f  // Détection jusqu'à 10 mètres
+
+    data class Size(val width: Float, val height: Float)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
 
-        // ⚙️ OSMDroid Init
+        // Initialisation OSMDroid
         val ctx = applicationContext
         Configuration.getInstance().load(ctx, getSharedPreferences("osmdroid", MODE_PRIVATE))
         Configuration.getInstance().userAgentValue = ctx.packageName
 
         setContentView(R.layout.activity_navigation_with_detection)
 
-        // 🛡 Permissions dynamiques
+        // Gestion des permissions
         if (ActivityCompat.checkSelfPermission(this, Manifest.permission.ACCESS_FINE_LOCATION) != PackageManager.PERMISSION_GRANTED) {
             ActivityCompat.requestPermissions(this, arrayOf(
                 Manifest.permission.ACCESS_FINE_LOCATION,
-                Manifest.permission.ACCESS_COARSE_LOCATION
+                Manifest.permission.ACCESS_COARSE_LOCATION,
+                Manifest.permission.CAMERA
             ), 101)
         }
 
-        // 🎛 UI Init
+        // Initialisation UI
         map = findViewById(R.id.mapView)
         textureView = findViewById(R.id.textureView)
         imageView = findViewById(R.id.imageView)
 
+        // Configuration TTS
         val selectedLang = intent.getStringExtra("lang") ?: "fr"
         ttsHelper = TTSHelper(this)
         ttsHelper.setLanguage(if (selectedLang == "darija") "ar" else "fr", if (selectedLang == "darija") "MA" else "FR")
         announcer = ObstacleAnnouncer(this, ttsHelper, selectedLang)
 
+        // Chargement du modèle TensorFlow Lite
         labels = FileUtil.loadLabels(this, "labels.txt")
         model = SsdMobilenetV11Metadata1.newInstance(this)
         imageProcessor = ImageProcessor.Builder()
             .add(ResizeOp(300, 300, ResizeOp.ResizeMethod.BILINEAR)).build()
+
         paint = Paint().apply {
             color = Color.RED
             strokeWidth = 6f
@@ -98,6 +120,7 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         setupCamera()
         setupButtons()
 
+        // Lancement de la boucle de navigation
         Thread { navigationLoop() }.start()
     }
 
@@ -111,35 +134,28 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         locationOverlay.enableFollowLocation()
         map.overlays.add(locationOverlay)
 
-        // Fallback location si GPS pas prêt
+        // Fallback si GPS non disponible
         val fallback = getLastKnownLocation()
-        if (fallback != null) {
-            map.controller.animateTo(fallback)
-            Log.d("GPS", "Fallback to $fallback")
+        fallback?.let {
+            map.controller.animateTo(it)
+            Log.d("GPS", "Fallback to $it")
         }
 
         locationOverlay.runOnFirstFix {
             runOnUiThread {
-                val loc = locationOverlay.myLocation
-                if (loc != null) {
-                    map.controller.animateTo(GeoPoint(loc.latitude, loc.longitude))
-                    Log.i("GPS", "GPS fix from overlay: $loc")
-                } else {
-                    Log.e("GPS", "runOnFirstFix triggered but location is null")
-                }
+                locationOverlay.myLocation?.let {
+                    map.controller.animateTo(GeoPoint(it.latitude, it.longitude))
+                    Log.i("GPS", "GPS fix: $it")
+                } ?: Log.e("GPS", "Location is null")
             }
         }
 
         map.setOnTouchListener { _, event ->
             if (event.action == MotionEvent.ACTION_UP) {
-                val userLoc = locationOverlay.myLocation
-                if (userLoc == null) {
-                    Toast.makeText(this, "Position GPS indisponible", Toast.LENGTH_SHORT).show()
-                    return@setOnTouchListener false
-                }
-
-                val point = map.projection.fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
-                handleDestinationSelected(point)
+                locationOverlay.myLocation?.let { userLoc ->
+                    val point = map.projection.fromPixels(event.x.toInt(), event.y.toInt()) as GeoPoint
+                    handleDestinationSelected(point)
+                } ?: Toast.makeText(this, "Position GPS indisponible", Toast.LENGTH_SHORT).show()
             }
             false
         }
@@ -147,18 +163,15 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
 
     private fun getLastKnownLocation(): GeoPoint? {
         val locationManager = getSystemService(LOCATION_SERVICE) as LocationManager
-        val providers = locationManager.getProviders(true)
-        for (provider in providers) {
+        return locationManager.getProviders(true).firstNotNullOfOrNull { provider ->
             try {
-                val loc = locationManager.getLastKnownLocation(provider)
-                if (loc != null) {
-                    return GeoPoint(loc.latitude, loc.longitude)
+                locationManager.getLastKnownLocation(provider)?.let {
+                    GeoPoint(it.latitude, it.longitude)
                 }
             } catch (e: SecurityException) {
-                e.printStackTrace()
+                null
             }
         }
-        return null
     }
 
     private fun handleDestinationSelected(destination: GeoPoint) {
@@ -171,12 +184,11 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         map.overlays.add(destinationMarker)
 
         val start = locationOverlay.myLocation ?: getLastKnownLocation()
-        if (start == null) {
-            Toast.makeText(this, "Position actuelle inconnue.", Toast.LENGTH_SHORT).show()
-            return
+        if (start != null) {
+            fetchRoute(GeoPoint(start.latitude, start.longitude), destination)
+        } else {
+            Toast.makeText(this, "Position actuelle inconnue", Toast.LENGTH_SHORT).show()
         }
-
-        fetchRoute(GeoPoint(start.latitude, start.longitude), destination)
     }
 
     private fun fetchRoute(start: GeoPoint, end: GeoPoint) {
@@ -190,35 +202,36 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
                 connection.connect()
                 val json = connection.inputStream.bufferedReader().use { it.readText() }
 
-                val geometry = JSONObject(json)
+                val route = JSONObject(json)
                     .getJSONArray("routes").getJSONObject(0)
                     .getJSONObject("geometry").getJSONArray("coordinates")
+                    .let { coords ->
+                        List(coords.length()) { i ->
+                            val coord = coords.getJSONArray(i)
+                            GeoPoint(coord.getDouble(1), coord.getDouble(0))
+                        }
+                    }
 
-                val route = mutableListOf<GeoPoint>()
-                for (i in 0 until geometry.length()) {
-                    val coord = geometry.getJSONArray(i)
-                    route.add(GeoPoint(coord.getDouble(1), coord.getDouble(0)))
+                runOnUiThread {
+                    currentRoute = route
+                    drawRoute(route)
                 }
-
-                currentRoute = route
-                runOnUiThread { drawRoute(route) }
-
             } catch (e: Exception) {
-                e.printStackTrace()
+                Log.e("ROUTE", "Error fetching route", e)
             }
         }.start()
     }
 
     private fun drawRoute(points: List<GeoPoint>) {
         currentPolyline?.let { map.overlays.remove(it) }
-        val polyline = Polyline().apply {
+        currentPolyline = Polyline().apply {
             setPoints(points)
             color = Color.BLUE
             width = 10f
+        }.also {
+            map.overlays.add(it)
+            map.invalidate()
         }
-        currentPolyline = polyline
-        map.overlays.add(polyline)
-        map.invalidate()
     }
 
     private fun setupButtons() {
@@ -238,10 +251,8 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
     }
 
     private fun setupCamera() {
-        val handlerThread = HandlerThread("VideoThread")
-        handlerThread.start()
+        val handlerThread = HandlerThread("VideoThread").apply { start() }
         handler = Handler(handlerThread.looper)
-
         cameraManager = getSystemService(CAMERA_SERVICE) as CameraManager
 
         textureView.surfaceTextureListener = object : TextureView.SurfaceTextureListener {
@@ -249,10 +260,8 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
                 openCamera()
             }
             override fun onSurfaceTextureSizeChanged(surface: SurfaceTexture, width: Int, height: Int) {}
-            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture): Boolean = false
-            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) {
-                detectObstacles()
-            }
+            override fun onSurfaceTextureDestroyed(surface: SurfaceTexture) = false
+            override fun onSurfaceTextureUpdated(surface: SurfaceTexture) = detectObstacles()
         }
     }
 
@@ -262,8 +271,7 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
             return
         }
 
-        val cameraId = cameraManager.cameraIdList[0]
-        cameraManager.openCamera(cameraId, object : CameraDevice.StateCallback() {
+        cameraManager.openCamera(cameraManager.cameraIdList[0], object : CameraDevice.StateCallback() {
             override fun onOpened(device: CameraDevice) {
                 cameraDevice = device
                 val surface = Surface(textureView.surfaceTexture)
@@ -274,13 +282,18 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
                     override fun onConfigured(session: CameraCaptureSession) {
                         session.setRepeatingRequest(request.build(), null, handler)
                     }
-
-                    override fun onConfigureFailed(session: CameraCaptureSession) {}
+                    override fun onConfigureFailed(session: CameraCaptureSession) {
+                        Log.e("CAMERA", "Configuration failed")
+                    }
                 }, handler)
             }
-
-            override fun onDisconnected(camera: CameraDevice) {}
-            override fun onError(camera: CameraDevice, error: Int) {}
+            override fun onDisconnected(camera: CameraDevice) {
+                camera.close()
+            }
+            override fun onError(camera: CameraDevice, error: Int) {
+                camera.close()
+                Log.e("CAMERA", "Error code: $error")
+            }
         }, handler)
     }
 
@@ -288,74 +301,92 @@ class NavigationWithDetectionActivity : AppCompatActivity() {
         val bitmap = textureView.bitmap ?: return
         val mutable = bitmap.copy(Bitmap.Config.ARGB_8888, true)
         val canvas = Canvas(mutable)
+        val textPaint = Paint().apply {
+            color = Color.WHITE
+            textSize = 45f
+            style = Paint.Style.FILL
+            setShadowLayer(2f, 0f, 0f, Color.BLACK)
+        }
 
-        val tensor = imageProcessor.process(TensorImage.fromBitmap(bitmap))
-        val outputs = model.process(tensor)
-
+        val outputs = model.process(imageProcessor.process(TensorImage.fromBitmap(bitmap)))
         val locations = outputs.locationsAsTensorBuffer.floatArray
         val classes = outputs.classesAsTensorBuffer.floatArray
         val scores = outputs.scoresAsTensorBuffer.floatArray
 
+        // Traiter chaque détection
         for (i in scores.indices) {
             if (scores[i] > 0.5f) {
                 val labelIndex = classes[i].toInt()
-                val label = labels.getOrElse(labelIndex) { "?" }
+                val label = labels.getOrElse(labelIndex) { "unknown" }
 
-                if (obstacleLabels.contains(label)) {
+                // Si cette étiquette est définie dans notre dictionnaire de tailles réelles
+                REAL_OBSTACLE_SIZES[label]?.let { realSize ->
                     val x = i * 4
-                    val top = locations[x] * bitmap.height
                     val left = locations[x + 1] * bitmap.width
-                    val bottom = locations[x + 2] * bitmap.height
+                    val top = locations[x] * bitmap.height
                     val right = locations[x + 3] * bitmap.width
+                    val bottom = locations[x + 2] * bitmap.height
 
-                    canvas.drawRect(left, top, right, bottom, paint)
-                    announcer.announce(label)
+                    // Calcul de la largeur de l'objet en pixels
+                    val widthPx = right - left
+                    val heightPx = bottom - top
+
+                    // Calcul de la distance en utilisant la largeur ET la hauteur, puis moyenne
+                    val distanceByWidth = if (widthPx > 0) (realSize.width * FOCAL_LENGTH) / widthPx else Float.MAX_VALUE
+                    val distanceByHeight = if (heightPx > 0) (realSize.height * FOCAL_LENGTH) / heightPx else Float.MAX_VALUE
+
+                    // Utiliser la méthode qui donne la distance la plus fiable (généralement la plus petite)
+                    var distance = kotlin.math.min(distanceByWidth, distanceByHeight)
+
+                    // Limiter à la distance maximale de détection
+                    if (distance <= MAX_DETECTION_DISTANCE) {
+                        // Dessiner le rectangle de détection
+                        canvas.drawRect(left, top, right, bottom, paint)
+
+                        // Afficher la distance sur l'écran
+                        val distanceFormatted = "%.1f m".format(distance)
+                        canvas.drawText("$label: $distanceFormatted", left, top - 10, textPaint)
+
+                        // Annoncer l'obstacle via l'ObstacleAnnouncer
+                        announcer.announce(label, distance)
+
+                        Log.d("DETECTION", "$label détecté à $distanceFormatted")
+                    }
                 }
             }
         }
 
+        // Mettre à jour l'imageView avec les détections
         imageView.setImageBitmap(mutable)
     }
 
-    override fun onDestroy() {
-        super.onDestroy()
-        ttsHelper.shutdown()
-        model.close()
-    }
     private fun navigationLoop() {
         while (true) {
             val loc = locationOverlay.myLocation
             if (loc != null && currentRoute.isNotEmpty()) {
                 val user = GeoPoint(loc.latitude, loc.longitude)
+                val (closestIndex, _) = currentRoute.withIndex().minByOrNull {
+                    user.distanceToAsDouble(it.value)
+                } ?: continue
 
-                // Trouver le point le plus proche sur le trajet
-                var closestIndex = 0
-                var minDist = Double.MAX_VALUE
-                for (i in currentRoute.indices) {
-                    val dist = user.distanceToAsDouble(currentRoute[i])
-                    if (dist < minDist) {
-                        minDist = dist
-                        closestIndex = i
-                    }
-                }
-
-                // Annonce vocale en fonction de la position
                 if (closestIndex > lastInstructionIndex) {
                     val message = when {
                         closestIndex == currentRoute.size - 1 -> "Vous êtes arrivé"
-                        closestIndex < currentRoute.size - 1 -> "Continuez 50 mètres"
-                        else -> null
+                        else -> "Continuez 50 mètres"
                     }
-
-                    message?.let {
-                        ttsHelper.speak(it)
-                        lastInstructionIndex = closestIndex
-                    }
+                    ttsHelper.speak(message)
+                    lastInstructionIndex = closestIndex
                 }
             }
-
-            Thread.sleep(4000) // Pause entre chaque mise à jour
+            Thread.sleep(4000)
         }
     }
 
+    override fun onDestroy() {
+        super.onDestroy()
+        handler.looper.quitSafely()
+        ttsHelper.shutdown()
+        model.close()
+        cameraDevice.close()
+    }
 }
