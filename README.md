@@ -24,7 +24,7 @@ It combines **real-time object detection**, **offline maps with GPS tracking**, 
 
 ## 📱 Demo
 
-> _Add a GIF or screenshots here—e.g. `docs/images/demo.gif`._
+images/mobile.png
 
 ---
 
